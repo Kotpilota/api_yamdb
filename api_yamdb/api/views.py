@@ -5,18 +5,17 @@ from django.db.utils import IntegrityError
 from rest_framework import viewsets, status, mixins
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.permissions import IsAuthenticatedOrReadOnly, AllowAny, \
-    IsAdminUser, IsAuthenticated
+    IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
-from api.permissions import IsAdminOrReadOnly
+from api.permissions import IsAdminOrReadOnly, IsAuthorOrModerPermission, IsAdminOrStaffPermission
 
 from reviews.constants import USER
 from reviews.models import Comment, Review, Category, Title, Genre
 from .email_func import send_code
-from .permissions import IsOwnerOrReadOnly
 from .serializers import CommentSerializer, ReviewSerializer, \
     TokenSerializer, SignUpSerializer, TitleSerializer, GenreSerializer, \
-    CategorySerializer, UserSerializer
+    CategorySerializer, UserSerializer, NotAdminSerializer
 
 User = get_user_model()
 
@@ -27,8 +26,16 @@ class UserViewSet(viewsets.ModelViewSet):
     """
     queryset = User.objects.all()
     serializer_class = UserSerializer
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrStaffPermission]
     lookup_field = 'username'
+    http_method_names = ['get', 'post', 'patch', 'delete']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        username = self.request.query_params.get('search')
+        if username:
+            queryset = queryset.filter(username__icontains=username)
+        return queryset
 
     @action(
         detail=False, methods=['get', 'patch'],
@@ -43,8 +50,9 @@ class UserViewSet(viewsets.ModelViewSet):
             return Response(serializer.data, status=status.HTTP_200_OK)
 
         if request.method == 'PATCH':
-            serializer = self.get_serializer(
-                request.user, data=request.data, partial=True
+            serializer = NotAdminSerializer(
+                request.user, data=request.data, partial=True,
+                context={'request': request}
             )
             serializer.is_valid(raise_exception=True)
             serializer.save()
@@ -55,13 +63,8 @@ class UserViewSet(viewsets.ModelViewSet):
         Удаление пользователя. Только для администраторов и суперпользователей.
         """
         instance = self.get_object()
-        if request.user.is_admin or request.user.is_superuser:
-            self.perform_destroy(instance)
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        return Response(
-            {'detail': 'У вас нет прав на удаление этого пользователя.'},
-            status=status.HTTP_403_FORBIDDEN
-        )
+        self.perform_destroy(instance)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class TitleViewSet(viewsets.ModelViewSet):
@@ -92,12 +95,6 @@ class TitleViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save()
-
-    def perform_create(self, serializer):
-        serializer.save()
-
-    def put(self, request, *args, **kwargs):
-        return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
 
 class CategoryViewSet(mixins.CreateModelMixin,
@@ -196,23 +193,32 @@ def get_token(request):
 
 
 class ReviewViewSet(viewsets.ModelViewSet):
-    queryset = Review.objects.all()
     serializer_class = ReviewSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly, IsOwnerOrReadOnly]
+    permission_classes = [IsAuthenticatedOrReadOnly, IsAuthorOrModerPermission]
+    http_method_names = ['get', 'post', 'patch', 'delete']
+
+    def get_queryset(self):
+        title_id = self.kwargs.get('title_id')
+        title = get_object_or_404(Title, pk=title_id)
+        return title.reviews.all()
 
     def perform_create(self, serializer):
-        serializer.save(author=self.request.user)
+        title_id = self.kwargs.get('title_id')
+        title = get_object_or_404(Title, pk=title_id)
+        serializer.save(author=self.request.user, title=title)
 
 
 class CommentViewSet(viewsets.ModelViewSet):
     serializer_class = CommentSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly, IsOwnerOrReadOnly]
+    permission_classes = [IsAuthenticatedOrReadOnly, IsAuthorOrModerPermission]
+    http_method_names = ['get', 'post', 'patch', 'delete']
 
     def get_queryset(self):
-        review_id = self.kwargs.get('review_pk')
-        return Comment.objects.filter(review__id=review_id)
+        review_id = self.kwargs.get('review_id')
+        review = get_object_or_404(Review, pk=review_id)
+        return review.comments.all()
 
     def perform_create(self, serializer):
-        review_id = self.kwargs.get('review_pk')
+        review_id = self.kwargs.get('review_id')
         review = get_object_or_404(Review, pk=review_id)
         serializer.save(author=self.request.user, review=review)

@@ -2,9 +2,11 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from django.shortcuts import get_object_or_404
 from django.core.validators import RegexValidator
-from reviews.constants import USERNAME_LENGTH, EMAIL_LENGTH
+from reviews.constants import USERNAME_LENGTH, EMAIL_LENGTH, MIN_SCORE, \
+    MAX_SCORE
 from reviews.models import Comment, Review, Genre, Category, Title
 from reviews.validators import username_validator
+from django.utils import timezone
 
 User = get_user_model()
 
@@ -13,6 +15,7 @@ class GenreSerializer(serializers.ModelSerializer):
     """
     Сериализатор для модели Genre.
     """
+
     class Meta:
         model = Genre
         fields = ('name', 'slug')
@@ -22,6 +25,7 @@ class CategorySerializer(serializers.ModelSerializer):
     """
     Сериализатор для модели Category.
     """
+
     class Meta:
         model = Category
         fields = ('name', 'slug')
@@ -61,8 +65,11 @@ class TitleSerializer(serializers.ModelSerializer):
         return rep
 
     def validate_year(self, value):
-        if not isinstance(value, int):
-            raise serializers.ValidationError("Год должен быть числом.")
+        current_year = timezone.now().year
+        if value > current_year:
+            raise serializers.ValidationError(
+                "Год выпуска не может быть больше текущего."
+            )
         return value
 
     def create(self, validated_data):
@@ -73,13 +80,40 @@ class TitleSerializer(serializers.ModelSerializer):
 
 
 class ReviewSerializer(serializers.ModelSerializer):
+    author = serializers.SlugRelatedField(
+        read_only=True,
+        slug_field='username'
+    )
+    score = serializers.IntegerField(
+        min_value=MIN_SCORE, max_value=MAX_SCORE
+    )
+
     class Meta:
         model = Review
         fields = ('id', 'title', 'author', 'text', 'score', 'pub_date')
         read_only_fields = ('author', 'title', 'pub_date')
 
+    def validate(self, data):
+        if self.context['request'].method != 'POST':
+            return data
+
+        title_id = self.context['view'].kwargs.get('title_id')
+        title = get_object_or_404(Title, id=title_id)
+        author = self.context['request'].user
+
+        if Review.objects.filter(title=title, author=author).exists():
+            raise serializers.ValidationError(
+                'Вы уже оставили отзыв на это произведение'
+            )
+        return data
+
 
 class CommentSerializer(serializers.ModelSerializer):
+    author = serializers.SlugRelatedField(
+        read_only=True,
+        slug_field='username'
+    )
+
     class Meta:
         model = Comment
         fields = ('id', 'review', 'author', 'text', 'pub_date')
@@ -94,7 +128,6 @@ class TokenSerializer(serializers.Serializer):
         required=True
     )
     confirmation_code = serializers.CharField(
-        max_length=USERNAME_LENGTH,
         required=True
     )
 
@@ -132,17 +165,29 @@ class UserSerializer(serializers.ModelSerializer):
             'bio', 'role'
         )
 
-    def validate_role(self, value):
-        """
-        Пользователи не могут менять свои роли.
-        """
-        if self.instance and self.instance.role != value and not self.context['request'].user.is_admin:
-            raise serializers.ValidationError('Вы не можете изменить свою роль.')
+    def validate_username(self, value):
+        if value.lower() == 'me':
+            raise serializers.ValidationError(
+                'Имя пользователя "me" запрещено.')
+
+        # Проверяем уникальность только при создании нового пользователя
+        if self.instance is None and User.objects.filter(
+                username=value).exists():
+            raise serializers.ValidationError('Имя пользователя уже занято.')
+
+        return value
+
+    def validate_email(self, value):
+        # Проверяем уникальность только при создании нового пользователя
+        if self.instance is None and User.objects.filter(email=value).exists():
+            raise serializers.ValidationError('Этот email уже используется.')
+
         return value
 
 
 class NotAdminSerializer(UserSerializer):
     """Сериализатор для остальных пользователей."""
+
     class Meta(UserSerializer.Meta):
         read_only_fields = ('role',)
 
@@ -168,11 +213,11 @@ class SignUpSerializer(serializers.Serializer):
         Проверка на недопустимые имена и длину.
         """
         if len(value) > 150:
-            raise serializers.ValidationError('Имя пользователя не может превышать 150 символов.')
-        if User.objects.filter(username=value).exists():
-            raise serializers.ValidationError('Имя пользователя уже занято.')
+            raise serializers.ValidationError(
+                'Имя пользователя не может превышать 150 символов.')
         if value.lower() == 'me':
-            raise serializers.ValidationError('Имя пользователя "me" запрещено.')
+            raise serializers.ValidationError(
+                'Имя пользователя "me" запрещено.')
         return value
 
     def validate_email(self, value):
@@ -180,7 +225,6 @@ class SignUpSerializer(serializers.Serializer):
         Проверка уникальности и корректности email.
         """
         if len(value) > 254:
-            raise serializers.ValidationError('Email не может превышать 254 символа.')
-        if User.objects.filter(email=value).exists():
-            raise serializers.ValidationError('Этот email уже используется.')
+            raise serializers.ValidationError(
+                'Email не может превышать 254 символа.')
         return value
