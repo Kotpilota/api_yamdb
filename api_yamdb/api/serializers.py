@@ -2,11 +2,9 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from django.shortcuts import get_object_or_404
 from django.core.validators import RegexValidator
-from reviews.constants import USERNAME_LENGTH, EMAIL_LENGTH, MIN_SCORE, \
-    MAX_SCORE
+from reviews.constants import USERNAME_LENGTH, EMAIL_LENGTH
 from reviews.models import Comment, Review, Genre, Category, Title
 from reviews.validators import username_validator
-from django.utils import timezone
 
 User = get_user_model()
 
@@ -15,7 +13,6 @@ class GenreSerializer(serializers.ModelSerializer):
     """
     Сериализатор для модели Genre.
     """
-
     class Meta:
         model = Genre
         fields = ('name', 'slug')
@@ -25,7 +22,6 @@ class CategorySerializer(serializers.ModelSerializer):
     """
     Сериализатор для модели Category.
     """
-
     class Meta:
         model = Category
         fields = ('name', 'slug')
@@ -65,11 +61,8 @@ class TitleSerializer(serializers.ModelSerializer):
         return rep
 
     def validate_year(self, value):
-        current_year = timezone.now().year
-        if value > current_year:
-            raise serializers.ValidationError(
-                "Год выпуска не может быть больше текущего."
-            )
+        if not isinstance(value, int):
+            raise serializers.ValidationError("Год должен быть числом.")
         return value
 
     def create(self, validated_data):
@@ -84,28 +77,15 @@ class ReviewSerializer(serializers.ModelSerializer):
         read_only=True,
         slug_field='username'
     )
-    score = serializers.IntegerField(
-        min_value=MIN_SCORE, max_value=MAX_SCORE
-    )
-
     class Meta:
         model = Review
         fields = ('id', 'title', 'author', 'text', 'score', 'pub_date')
         read_only_fields = ('author', 'title', 'pub_date')
 
-    def validate(self, data):
-        if self.context['request'].method != 'POST':
-            return data
-
-        title_id = self.context['view'].kwargs.get('title_id')
-        title = get_object_or_404(Title, id=title_id)
-        author = self.context['request'].user
-
-        if Review.objects.filter(title=title, author=author).exists():
-            raise serializers.ValidationError(
-                'Вы уже оставили отзыв на это произведение'
-            )
-        return data
+    def validate_score(self, value):
+        if not (1 <= value <= 10):
+            raise serializers.ValidationError("Score must be between 1 and 10.")
+        return value
 
 
 class CommentSerializer(serializers.ModelSerializer):
@@ -117,8 +97,7 @@ class CommentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Comment
         fields = ('id', 'review', 'author', 'text', 'pub_date')
-        read_only_fields = ('author', 'review', 'pub_date')
-
+        extra_kwargs = {'review': {'read_only': True}}
 
 class TokenSerializer(serializers.Serializer):
     """Сериализатор для получения JWT-токена."""
@@ -128,6 +107,7 @@ class TokenSerializer(serializers.Serializer):
         required=True
     )
     confirmation_code = serializers.CharField(
+        max_length=USERNAME_LENGTH,
         required=True
     )
 
@@ -170,7 +150,6 @@ class UserSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 'Имя пользователя "me" запрещено.')
 
-        # Проверяем уникальность только при создании нового пользователя
         if self.instance is None and User.objects.filter(
                 username=value).exists():
             raise serializers.ValidationError('Имя пользователя уже занято.')
@@ -178,7 +157,6 @@ class UserSerializer(serializers.ModelSerializer):
         return value
 
     def validate_email(self, value):
-        # Проверяем уникальность только при создании нового пользователя
         if self.instance is None and User.objects.filter(email=value).exists():
             raise serializers.ValidationError('Этот email уже используется.')
 
@@ -190,6 +168,7 @@ class NotAdminSerializer(UserSerializer):
 
     class Meta(UserSerializer.Meta):
         read_only_fields = ('role',)
+
 
 
 class SignUpSerializer(serializers.Serializer):

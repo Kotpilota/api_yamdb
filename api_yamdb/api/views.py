@@ -1,21 +1,26 @@
+from api.permissions import (IsAdminOrReadOnly, IsAdminOrStaffPermission,
+                             IsAuthenticatedOrReadOnly,
+                             IsAuthorOrModerPermission, IsOwnerOrReadOnly)
+from rest_framework.exceptions import PermissionDenied
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
-from django.shortcuts import get_object_or_404
 from django.db.utils import IntegrityError
-from rest_framework import viewsets, status, mixins
-from rest_framework.decorators import api_view, permission_classes, action
-from rest_framework.permissions import IsAuthenticatedOrReadOnly, AllowAny, \
-    IsAuthenticated
+from django.shortcuts import get_object_or_404
+from rest_framework import mixins, status, viewsets
+from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.exceptions import ValidationError
+from rest_framework.permissions import (AllowAny, IsAuthenticated)
+                                        # IsAuthenticatedOrReadOnly)
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
-from api.permissions import IsAdminOrReadOnly, IsAuthorOrModerPermission, IsAdminOrStaffPermission
-
 from reviews.constants import USER
-from reviews.models import Comment, Review, Category, Title, Genre
+from reviews.models import Category, Comment, Genre, Review, Title
+
 from .email_func import send_code
-from .serializers import CommentSerializer, ReviewSerializer, \
-    TokenSerializer, SignUpSerializer, TitleSerializer, GenreSerializer, \
-    CategorySerializer, UserSerializer, NotAdminSerializer
+from .serializers import (CategorySerializer, CommentSerializer,
+                          GenreSerializer, NotAdminSerializer,
+                          ReviewSerializer, SignUpSerializer, TitleSerializer,
+                          TokenSerializer, UserSerializer)
 
 User = get_user_model()
 
@@ -50,6 +55,11 @@ class UserViewSet(viewsets.ModelViewSet):
             return Response(serializer.data, status=status.HTTP_200_OK)
 
         if request.method == 'PATCH':
+            if 'role' in request.data:
+                request.data._mutable = True
+                request.data.pop('role')
+                request.data._mutable = False
+
             serializer = NotAdminSerializer(
                 request.user, data=request.data, partial=True,
                 context={'request': request}
@@ -96,6 +106,9 @@ class TitleViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save()
 
+    def put(self, request, *args, **kwargs):
+        return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
 
 class CategoryViewSet(mixins.CreateModelMixin,
                       mixins.DestroyModelMixin,
@@ -136,7 +149,47 @@ class GenreViewSet(mixins.CreateModelMixin,
             qs = qs.filter(name__icontains=search_query)
         return qs
 
+class ReviewViewSet(viewsets.ModelViewSet):
+    """
+    Viewset для управления отзывами.
+    """
+    serializer_class = ReviewSerializer
+    permission_classes = [IsAuthenticatedOrReadOnly]
+    http_method_names = ['get', 'post', 'patch', 'delete']
 
+    def get_queryset(self):
+        title_id = self.kwargs.get('title_id')
+        return Review.objects.filter(title_id=title_id)
+
+    def get_permissions(self):
+        if self.action in ['partial_update', 'destroy']:
+            return [IsAuthorOrModerPermission, IsOwnerOrReadOnly()]
+        elif self.action in ['create']:
+            return [IsAuthenticated()]
+        return [AllowAny()]
+
+    def perform_create(self, serializer):
+        title_id = self.kwargs.get('title_id')
+        title = get_object_or_404(Title, pk=title_id)
+        
+        existing_review = Review.objects.filter(title=title, author=self.request.user)
+        if existing_review.exists():
+            raise ValidationError("Вы уже оставили отзыв на это произведение.")
+
+        serializer.save(author=self.request.user, title=title)
+
+    def retrieve(self, request, *args, **kwargs):
+        # Позволяет доступ без токена
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+    def partial_update(self, request, *args, **kwargs):
+        return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
+    
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def signup(request):
@@ -192,33 +245,44 @@ def get_token(request):
     return Response({'token': token}, status=status.HTTP_200_OK)
 
 
-class ReviewViewSet(viewsets.ModelViewSet):
-    serializer_class = ReviewSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly, IsAuthorOrModerPermission]
-    http_method_names = ['get', 'post', 'patch', 'delete']
-
-    def get_queryset(self):
-        title_id = self.kwargs.get('title_id')
-        title = get_object_or_404(Title, pk=title_id)
-        return title.reviews.all()
-
-    def perform_create(self, serializer):
-        title_id = self.kwargs.get('title_id')
-        title = get_object_or_404(Title, pk=title_id)
-        serializer.save(author=self.request.user, title=title)
-
 
 class CommentViewSet(viewsets.ModelViewSet):
+    """
+    Viewset для комментариев. 
+    """
+
     serializer_class = CommentSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly, IsAuthorOrModerPermission]
+    permission_classes = [IsAuthenticatedOrReadOnly, IsOwnerOrReadOnly]
     http_method_names = ['get', 'post', 'patch', 'delete']
 
     def get_queryset(self):
-        review_id = self.kwargs.get('review_id')
-        review = get_object_or_404(Review, pk=review_id)
-        return review.comments.all()
+        review_id = self.kwargs.get('review_pk')
+        return Comment.objects.filter(review__id=review_id)
+
+    def get_permissions(self):
+        if self.action in ['partial_update', 'destroy']:
+            return [ IsOwnerOrReadOnly(), IsAuthorOrModerPermission()]
+        elif self.action in ['create']:
+            return [IsAuthenticated()]
+        return [AllowAny()]
 
     def perform_create(self, serializer):
-        review_id = self.kwargs.get('review_id')
+        review_id = self.kwargs.get('review_pk')
         review = get_object_or_404(Review, pk=review_id)
+        if not self.request.user.is_authenticated:
+            raise PermissionDenied("Authentication is required to perform this action.")
         serializer.save(author=self.request.user, review=review)
+
+    def retrieve(self, request, *args, **kwargs):
+        # Доступ к комментарию по id без токена
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+    def partial_update(self, request, *args, **kwargs):
+        # Разрешение на частичное обновление
+        return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        # Разрешение на удаление
+        return super().destroy(request, *args, **kwargs)
