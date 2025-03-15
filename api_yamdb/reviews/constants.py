@@ -1,13 +1,14 @@
-# Роли пользователей:
-USER = 'user'
-ADMIN = 'admin'
-MODERATOR = 'moderator'
+from django.db import models
+from django.utils.translation import gettext_lazy as gt
 
-ROLE_CHOICES = (
-    (USER, USER),
-    (ADMIN, ADMIN),
-    (MODERATOR, MODERATOR),
-)
+# Роли пользователей:
+
+
+class RoleChoices(models.TextChoices):
+    USER = 'user', gt('User')
+    ADMIN = 'admin', gt('Administrator')
+    MODERATOR = 'moderator', gt('Moderator')
+
 
 # Ограничитель длинны почты:
 EMAIL_LENGTH = 254
